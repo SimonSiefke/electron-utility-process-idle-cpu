@@ -81,7 +81,7 @@ jobs:
       - name: Measure idle CPU and retired instructions on Apple Silicon
         run: |
           test "$(uname -m)" = arm64
-          python3 measure.py --require-reproduction --require-instructions --trace-seconds 8
+          python3 measure.py --require-reproduction --require-instructions --trace-seconds 16
       - name: Upload samples, graph, instruction counts and native stacks
         if: always()
         uses: actions/upload-artifact@v4

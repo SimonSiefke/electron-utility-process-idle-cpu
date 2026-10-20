@@ -122,6 +122,7 @@ def main():
     out.mkdir(exist_ok=True)
     ready = out / 'ready.json'
     ready.unlink(missing_ok=True)
+    (out / 'trace-done').unlink(missing_ok=True)
     children, files = [], []
 
     def launch(command, log, **kwargs):
@@ -142,7 +143,8 @@ def main():
     try:
         node = launch(['node', str(ROOT / 'idle.cjs')], 'node.log')
         wait_for(lambda: 'hello world\n' in (out / 'node.log').read_text(), node)
-        env = {**os.environ, 'REPRO_READY_FILE': str(ready)}
+        env = {**os.environ, 'REPRO_READY_FILE': str(ready),
+               'REPRO_TRACE_SECONDS': str(args.trace_seconds)}
         env.pop('ELECTRON_RUN_AS_NODE', None)
         electron = launch([str(ROOT / 'node_modules/.bin/electron'), '--no-sandbox', str(ROOT)],
                           'electron.log', env=env)
@@ -245,6 +247,25 @@ def main():
         if os.environ.get('GITHUB_STEP_SUMMARY'):
             with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as handle:
                 handle.write(report)
+        # Separate phase: trace the actual allocator events without perturbing primary samples.
+        if args.trace_seconds:
+            os.kill(metadata['hostPid'], signal.SIGUSR2)
+            deadline = time.monotonic() + args.trace_seconds + 30
+            while not (out / 'trace-done').exists():
+                if electron.poll() is not None or time.monotonic() > deadline:
+                    raise RuntimeError('Chromium tracing failed; see electron.log')
+                time.sleep(0.1)
+            trace = json.loads((out / 'chromium-trace.json').read_text())
+            events = [event for event in trace['traceEvents']
+                      if event.get('pid') == pids['electron']
+                      and 'MemoryReclaimer::Reclaim' in event.get('name', '')
+                      and event.get('ph') in ('X', 'B')]
+            times = sorted(event['ts'] / 1e6 for event in events)
+            evidence = {'utility_pid': pids['electron'], 'reclaim_events': events,
+                        'intervals_seconds': [b - a for a, b in zip(times, times[1:])]}
+            (out / 'reclaimer-events.json').write_text(json.dumps(evidence, indent=2))
+            print(f'Utility-process allocator trace: {len(events)} reclaim events; '
+                  f"intervals {evidence['intervals_seconds']}", flush=True)
         # Separate phase: ptrace must not contaminate the primary CPU comparison.
         if not DARWIN and args.trace_seconds and shutil.which('strace'):
             traces = []
