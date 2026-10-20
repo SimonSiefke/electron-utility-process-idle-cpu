@@ -1,0 +1,58 @@
+name: ARM64 idle CPU comparison
+
+on:
+  push:
+  workflow_dispatch:
+    inputs:
+      require_instructions:
+        description: Fail if hardware instruction counters are unavailable
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - name: Match standalone Node to Electron's embedded Node version
+        id: embedded
+        run: echo "node=$(ELECTRON_RUN_AS_NODE=1 node_modules/.bin/electron -p process.versions.node)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.embedded.outputs.node }}
+      - name: Install measurement and display tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb xauth strace linux-tools-common linux-tools-generic
+          # The running Azure kernel may not have a matching linux-tools package.
+          # perf's userspace ABI supports using the generic kernel's binary.
+          perf_binary=$(find /usr/lib/linux-tools -type f -name perf | sort -V | tail -n 1)
+          test -n "$perf_binary"
+          sudo ln -sf "$perf_binary" /usr/local/bin/perf
+          sudo sysctl kernel.perf_event_paranoid=-1 kernel.yama.ptrace_scope=0 kernel.sched_schedstats=1
+      - name: Check analysis
+        run: npm test
+      - name: Measure both idle workloads
+        env:
+          REQUIRE_INSTRUCTIONS: ${{ inputs.require_instructions || false }}
+        run: |
+          test "$(uname -m)" = aarch64
+          extra=()
+          if [ "$REQUIRE_INSTRUCTIONS" = true ]; then extra+=(--require-instructions); fi
+          xvfb-run -a python3 measure.py --require-reproduction "${extra[@]}"
+      - name: Upload samples, graph, counters and separate syscall traces
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arm64-idle-cpu-comparison
+          path: results/
+          if-no-files-found: warn

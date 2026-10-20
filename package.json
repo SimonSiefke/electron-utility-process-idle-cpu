@@ -1,0 +1,9 @@
+{
+  "name": "electron-utility-process-idle-cpu",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Compare idle Electron utility process CPU with the same program in Node.js",
+  "main": "main.cjs",
+  "scripts": { "measure": "python3 measure.py", "test": "python3 -m unittest discover -s tests -v" },
+  "devDependencies": { "electron": "44.9.1" }
+}
