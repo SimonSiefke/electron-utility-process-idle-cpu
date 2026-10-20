@@ -1,0 +1,58 @@
+{
+  "utility_pid": 1264,
+  "reclaim_events": [
+    {
+      "args": {},
+      "cat": "base",
+      "dur": 150,
+      "name": "partition_alloc::MemoryReclaimer::Reclaim()",
+      "ph": "X",
+      "pid": 1264,
+      "tdur": 151,
+      "tid": 6947,
+      "ts": 224903358,
+      "tts": 70357
+    },
+    {
+      "args": {},
+      "cat": "base",
+      "dur": 38,
+      "name": "partition_alloc::MemoryReclaimer::Reclaim()",
+      "ph": "X",
+      "pid": 1264,
+      "tdur": 37,
+      "tid": 6947,
+      "ts": 228940219,
+      "tts": 70596
+    },
+    {
+      "args": {},
+      "cat": "base",
+      "dur": 64,
+      "name": "partition_alloc::MemoryReclaimer::Reclaim()",
+      "ph": "X",
+      "pid": 1264,
+      "tdur": 63,
+      "tid": 6947,
+      "ts": 233015447,
+      "tts": 70723
+    },
+    {
+      "args": {},
+      "cat": "base",
+      "dur": 49,
+      "name": "partition_alloc::MemoryReclaimer::Reclaim()",
+      "ph": "X",
+      "pid": 1264,
+      "tdur": 50,
+      "tid": 6947,
+      "ts": 237026221,
+      "tts": 70893
+    }
+  ],
+  "intervals_seconds": [
+    4.036861000000016,
+    4.075227999999981,
+    4.010773999999998
+  ]
+}

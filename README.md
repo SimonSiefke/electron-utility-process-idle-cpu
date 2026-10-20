@@ -1,61 +1,72 @@
-# Electron utility process idle CPU reproduction
+# Electron utility process idle CPU
 
-Compare an idle Electron **utility process** with standalone Node.js on native ARM64 (Linux and Apple Silicon macOS). Both execute exactly the same [`idle.cjs`](idle.cjs):
+An Electron utility process wakes up roughly every four seconds, even when its JavaScript has nothing to do. This repo compares it with a standalone Node.js process running the same file:
 
 ```js
 console.log('hello world');
 setTimeout(() => {}, 2147483647);
 ```
 
-The timeout is about 24.9 days. A delay of `9999999999` exceeds Node's signed 32-bit limit and becomes 1ms, so it is unsuitable as a keepalive ([Node timer documentation](https://nodejs.org/api/timers.html#settimeoutcallback-delay-args)). There are no periodic JavaScript callbacks, allocation loops, or polling in either workload.
+The timeout keeps the process alive for about 25 days. Larger delays such as `9999999999` [overflow to 1ms in Node](https://nodejs.org/api/timers.html#settimeoutcallback-delay-args).
 
-## Run the ARM64 comparison
+The periodic work comes from Chromium's PartitionAlloc memory reclaimer. It [waits one minute before starting](https://github.com/chromium/chromium/blob/152.0.7977.167/base/allocator/partition_alloc_support.cc), then reclaims memory about every four seconds. The benchmark waits 70 seconds before measuring so it catches this behavior.
 
-Pushes run [ARM64 idle CPU comparison](../../actions/workflows/idle-cpu.yml) on `ubuntu-24.04-arm` and `macos-15` (Apple Silicon). Use **Run workflow** to repeat it. The repository is public because [standard ARM64 hosted runners require a public repository](https://github.blog/changelog/2025-08-07-arm64-hosted-runners-for-public-repositories-are-now-generally-available/).
+## Run in CI
 
-Electron is pinned in `package-lock.json`. CI selects the exact standalone Node version embedded in that Electron release. The job:
+The [GitHub Actions workflow](https://github.com/SimonSiefke/electron-utility-process-idle-cpu/actions/workflows/idle-cpu.yml) runs on Linux ARM64 and Apple Silicon macOS. Push a commit or select **Run workflow** to start it.
 
-1. Starts standalone Node and an Electron app that calls [`utilityProcess.fork`](https://www.electronjs.org/docs/latest/api/utility-process) on the same file. It waits for both hello-world messages.
-2. Excludes 70 seconds of startup activity, then samples each target PID's **entire thread group** every 100ms for 64 seconds. On Linux, CPU execution comes from nanosecond `/proc/PID/task/TID/schedstat` counters; on macOS it comes from `proc_pid_rusage` V4's process-wide user + system Mach ticks, converted to nanoseconds with `mach_timebase_info`; Electron's host, GPU and other processes are excluded.
-3. On Apple Silicon, reads **retired instructions, CPU cycles and idle wakeups** via `proc_pid_rusage` V4 every 100ms, in the same window as CPU time. This is process-wide accounting, without a user/kernel privilege filter. Nonzero lifetime instruction counts after startup validate availability; an idle window can then legitimately have a delta of zero. Hosted macOS VMs can return zero lifetime instruction counts; these are reported as **Unavailable**, with a CI warning. The manual `require_instructions` option enforces working counters on both platforms. On Linux, probes hardware `instructions:u` with a busy control to reject unavailable or nonfunctional counters. If the probe works, concurrent `perf stat -I 100 -p PID` recordings compare retired user instructions across each target's threads. Raw interval counts and totals are saved. Kernel instructions are excluded. This is a different quantity from elapsed time or CPU milliseconds.
-4. Records a separate Chromium trace after the primary measurement and extracts `MemoryReclaimer::Reclaim` events for the **utility PID only** into `reclaimer-events.json`, including their actual intervals. The host receives a signal to start tracing; the idle script has no tracing code. On macOS, also saves native `sample` stacks after the primary measurement. On Linux, records a separate 16-second `strace` phase for both processes, including `madvise`, futex and event-loop waits. Tracing happens **after** CPU sampling to keep ptrace overhead out of the comparison.
-5. Publishes the measured table in the Actions summary and uploads the `arm64-idle-cpu-comparison` / `macos-arm64-idle-cpu-comparison` artifact, including `cpu.svg`, `samples.csv`, `summary.json`, environment/versions, instruction counters and syscall traces. Artifacts are uploaded even when the check fails.
+Each job matches standalone Node to Electron's embedded Node version, then measures both processes for 64 seconds at 100ms intervals. Sampling happens outside the processes and includes all their threads. Electron's main process and GPU process aren't counted.
 
-ARM64 does **not** guarantee access to hardware counters inside a hosted VM, on either Linux or macOS. The [runner-images report](https://github.com/actions/runner-images/issues/11689) documents hardware-counter limitations on ARM runners. On Linux, if the busy probe cannot obtain positive instruction counts, the result says **Unavailable**, and the CPU-time comparison still runs. Select `require_instructions` in the manual workflow to fail when counters are unavailable. A machine exposing working hardware counters is needed for an actual instruction-count comparison; software CPU time is never presented as an instruction count.
+CI checks for repeated four-second CPU bursts in Electron and compares its total CPU time with Node. A separate Chromium trace records `MemoryReclaimer::Reclaim` calls in the utility process. See [measure.py](measure.py) for the detection thresholds.
 
-The 70-second warmup matters: Chromium [delays the first allocator reclaim by one minute](https://github.com/chromium/chromium/blob/152.0.7977.167/base/allocator/partition_alloc_support.cc). A short experiment can misleadingly show both processes sleeping. The sampler waits through that delay without changing Chromium feature flags. Darwin counter layout follows [Apple’s public `rusage_info_v4` structure](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/resource.h).
+The run summary has the comparison table. Download the artifact for `cpu.svg`, raw samples, runtime versions, and allocator traces. Linux also records syscall traces; macOS records native stacks. These diagnostics run after the CPU measurement.
 
-## What counts as reproducing the bug?
+### Instruction counts
 
-The check groups CPU samples of at least 0.02ms into bursts (activity within 0.3s is merged). It requires at least half the expected four-second intervals to fall in `[3.5s, 4.5s]`, with a minimum of three matches, more total Electron CPU than Node by at least 0.1ms, and no matching four-second cadence in Node. It fails if these conditions are absent. Raw times and counts are retained so a green result can be checked against the timeline. The thresholds tolerate scheduler jitter but are a heuristic, not a statistical proof.
+The benchmark also attempts to count retired CPU instructions using Linux `perf` or macOS `proc_pid_rusage`.
 
-Node's actual CPU time is reported, including occasional runtime work; it is not assumed to be exactly zero. The measurement is intended to show recurring Electron activity against an otherwise sleeping baseline. CPU samples establish **when** work happened. The separate `chromium-trace.json` and extracted `reclaimer-events.json` can identify allocator reclaims and their cadence. `strace` can reveal memory-discard syscalls and the macOS native sample offers additional stack evidence. Trace and primary CPU windows are separate; a trace event alone does not establish how much of the primary CPU time it caused.
+Hosted ARM64 VMs can lack working hardware counters. Missing counts appear as `Unavailable`, with a warning. The CPU comparison still runs. Select `require_instructions` when starting the workflow manually to make missing counters fail the job.
 
-The source-level mechanism investigated is Chromium PartitionAlloc's memory reclaimer, whose recommended default interval is [four seconds](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/base/allocator/partition_allocator/src/partition_alloc/memory_reclaimer.cc). This is allocator housekeeping, not necessarily cleanup of JavaScript `Buffer` objects. Runtime versions and feature settings can change that behavior; the benchmark does not enable a four-second timer or force the result.
-
-## Verified local example (Linux x86_64)
-
-The [saved local evidence](evidence/linux-x64/summary.md) uses Electron 44.9.1 (embedded Node 24.22.0) and standalone Node 24.15.0. After 70s warmup, a 32s measurement recorded **1.939537ms Electron CPU versus 0ms Node CPU**. The separate utility-PID Chromium trace recorded four `MemoryReclaimer::Reclaim` events with gaps of **4.000287s, 4.000309s and 4.000375s**. This is local x86_64 evidence, not an ARM64 CI result; CI matches Node versions exactly.
-
-![Local x86_64 CPU timeline](evidence/linux-x64/cpu.svg)
+Linux counts user-space instructions. macOS counts instructions across the process without a user/kernel filter. Compare Electron with Node within the same job.
 
 ## Run locally
 
-On macOS, run `npm ci` then `python3 measure.py --require-reproduction`; add `--require-instructions` to demand hardware counters; Xvfb and Linux kernel settings do not apply.
-
-On Linux, requires Node.js, Python 3, Electron's system libraries, Xvfb and optionally `perf`/`strace`.
+Install dependencies and check which Node version Electron embeds:
 
 ```sh
 npm ci
-# Match this version with your Node version manager for a fair comparison:
+node node_modules/electron/install.js
 ELECTRON_RUN_AS_NODE=1 node_modules/.bin/electron -p process.versions.node
-sudo sysctl kernel.sched_schedstats=1
-# For optional perf / strace attachments on your own test machine:
-sudo sysctl kernel.perf_event_paranoid=-1 kernel.yama.ptrace_scope=0
-xvfb-run -a python3 measure.py --require-reproduction
-npm test
 ```
 
-The workflow installs its own tools and configures these kernel settings on the ephemeral runner. Electron uses `--no-sandbox` for this minimal local reproduction. No browser windows or external pages are loaded.
+Use that Node version for the comparison.
 
-Use `--duration`, `--warmup`, `--interval`, `--trace-seconds 0`, or `--require-instructions` to adjust a local experiment. Keep the 100ms sampling interval for the documented classification thresholds. Scheduler accounting can miss the final unsampled runtime of a thread that exits; transient thread creation/exit should be considered when interpreting the raw data. `perf` totals cover approximately 0.5s longer than the scheduler window and have their own interval clock.
+On macOS:
+
+```sh
+python3 measure.py --require-reproduction
+```
+
+On Linux, install Xvfb, xauth, Electron's system libraries, and optionally `perf` and `strace`. Enable scheduler accounting, then run:
+
+```sh
+sudo sysctl kernel.sched_schedstats=1
+xvfb-run -a python3 measure.py --require-reproduction
+```
+
+Linux may also need `kernel.perf_event_paranoid=-1` for instruction counting and `kernel.yama.ptrace_scope=0` for syscall tracing. CI sets these on its temporary runner.
+
+Results go in `results/`. Use `--trace-seconds 0` to skip diagnostics, or `--require-instructions` to require hardware counters. Run `npm test` to check the measurement analysis.
+
+## Example result
+
+An [Apple Silicon CI run](https://github.com/SimonSiefke/electron-utility-process-idle-cpu/actions/runs/39462195639/job/118764258467) with Electron 44.9.1 and Node 24.22.0 measured:
+
+| Process | CPU time over 64 seconds |
+| --- | ---: |
+| Electron utility process | 2.88ms |
+| Node.js | 0ms |
+
+The allocator trace showed reclaims every 4.01–4.08 seconds. Hardware instruction counters were unavailable on this runner. The [saved results](evidence/macos-arm64/summary.md) include the raw samples and runtime versions.
+
+![Apple Silicon CPU timeline](evidence/macos-arm64/cpu.svg)
