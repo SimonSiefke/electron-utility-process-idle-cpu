@@ -20,6 +20,18 @@ class RusageInfoV4(ctypes.Structure):
     ).split()]
 
 
+class MachTimebaseInfo(ctypes.Structure):
+    _fields_ = [('numer', ctypes.c_uint32), ('denom', ctypes.c_uint32)]
+
+
+_libsystem = ctypes.CDLL('/usr/lib/libSystem.B.dylib')
+_libsystem.mach_timebase_info.argtypes = [ctypes.POINTER(MachTimebaseInfo)]
+_libsystem.mach_timebase_info.restype = ctypes.c_int
+_timebase = MachTimebaseInfo()
+if _libsystem.mach_timebase_info(ctypes.byref(_timebase)) != 0 or not _timebase.denom:
+    raise RuntimeError('Cannot obtain the Mach CPU timebase')
+
+
 _libproc = ctypes.CDLL('/usr/lib/libproc.dylib', use_errno=True)
 _libproc.proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
 _libproc.proc_pid_rusage.restype = ctypes.c_int
@@ -30,6 +42,6 @@ def snapshot(pid):
     if _libproc.proc_pid_rusage(pid, 4, ctypes.byref(info)) != 0:
         error = ctypes.get_errno()
         raise OSError(error, f'proc_pid_rusage failed for {pid}')
-    return {'cpu_ns': info.user_time + info.system_time,
+    return {'cpu_ns': (info.user_time + info.system_time) * _timebase.numer // _timebase.denom,
             'instructions': info.instructions, 'cycles': info.cycles,
             'idle_wakeups': info.pkg_idle_wkups}

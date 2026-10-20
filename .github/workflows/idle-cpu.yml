@@ -91,9 +91,13 @@ jobs:
           node-version: ${{ steps.embedded.outputs.node }}
       - run: npm test
       - name: Measure idle CPU and retired instructions on Apple Silicon
+        env:
+          REQUIRE_INSTRUCTIONS: ${{ inputs.require_instructions || false }}
         run: |
           test "$(uname -m)" = arm64
-          python3 measure.py --require-reproduction --require-instructions --trace-seconds 16
+          extra=()
+          if [ "$REQUIRE_INSTRUCTIONS" = true ]; then extra+=(--require-instructions); fi
+          python3 measure.py --require-reproduction --trace-seconds 16 "${extra[@]}"
       - name: Upload samples, graph, instruction counts and native stacks
         if: always()
         uses: actions/upload-artifact@v4

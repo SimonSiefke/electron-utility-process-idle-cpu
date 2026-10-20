@@ -155,6 +155,9 @@ def main():
                        'node': subprocess.check_output(['node', '--version'], text=True).strip(),
                        'electron_versions': metadata['versions'], 'pids': pids,
                        'arguments': vars(args)}
+        if DARWIN:
+            from macos_counters import _timebase
+            environment['mach_timebase'] = {'numer': _timebase.numer, 'denom': _timebase.denom}
         (out / 'environment.json').write_text(json.dumps(environment, indent=2))
         print(f'Warming up for {args.warmup}s; PIDs {pids}', flush=True)
         time.sleep(args.warmup)
@@ -220,6 +223,9 @@ def main():
                             if initial[name]['instructions'] > 0 else None for name in pids}
         metrics['instructions'] = instructions
         metrics['instruction_counters_available'] = all(value is not None for value in instructions.values())
+        if not metrics['instruction_counters_available']:
+            print('::warning::Hardware instruction counts are unavailable for one or both workloads; '
+                  'CPU-time and allocator-trace checks still apply.', flush=True)
         (out / 'summary.json').write_text(json.dumps(metrics, indent=2))
         graph(rows, out / 'cpu.svg')
         summary = [f'## Idle CPU comparison ({environment["architecture"]})', '',
@@ -294,7 +300,7 @@ def main():
                                     '-file', str(out / f'{name}-stacks.txt')],
                                    capture_output=True, text=True, timeout=args.trace_seconds + 20)
         if args.require_instructions and not metrics['instruction_counters_available']:
-            raise SystemExit('Hardware instruction counters unavailable; see perf-probe.txt')
+            raise SystemExit('Hardware instruction counters unavailable; see summary.json and platform counter diagnostics')
         if args.require_reproduction and not metrics['reproduced']:
             raise SystemExit('Four-second cadence was not reproduced; inspect the artifacts')
     finally:
