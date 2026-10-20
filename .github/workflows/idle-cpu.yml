@@ -9,6 +9,10 @@ on:
         type: boolean
         default: false
 
+concurrency:
+  group: idle-cpu-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 

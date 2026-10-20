@@ -110,7 +110,7 @@ def graph(rows, path):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--duration', type=float, default=64)
-    parser.add_argument('--warmup', type=float, default=12)
+    parser.add_argument('--warmup', type=float, default=70)
     parser.add_argument('--interval', type=float, default=0.1)
     parser.add_argument('--trace-seconds', type=float, default=16)
     parser.add_argument('--require-reproduction', action='store_true')
