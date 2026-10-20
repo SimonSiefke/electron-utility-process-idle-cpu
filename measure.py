@@ -239,8 +239,8 @@ def main():
                      'No user/kernel privilege filter is applied.' if DARWIN else
                      'Linux user instruction totals use a separate perf clock/window (approximately measurement + 0.5s); '
                      'see raw interval files. Missing/unsupported counters are not zero instructions.'), '',
-                    'Scheduler CPU samples establish activity and timing, not its native call stack. '
-                    'The separate syscall traces can show madvise calls; allocator attribution remains a hypothesis unless profiled.']
+                    'Primary CPU samples establish activity and timing. The following, separate Chromium trace '
+                    'identifies allocator reclaim events for the utility PID; it does not measure their share of primary CPU time.']
         report = '\n'.join(summary) + '\n'
         (out / 'summary.md').write_text(report)
         print(report, flush=True)
@@ -264,8 +264,17 @@ def main():
             evidence = {'utility_pid': pids['electron'], 'reclaim_events': events,
                         'intervals_seconds': [b - a for a, b in zip(times, times[1:])]}
             (out / 'reclaimer-events.json').write_text(json.dumps(evidence, indent=2))
-            print(f'Utility-process allocator trace: {len(events)} reclaim events; '
-                  f"intervals {evidence['intervals_seconds']}", flush=True)
+            metrics['allocator_reclaim'] = evidence
+            (out / 'summary.json').write_text(json.dumps(metrics, indent=2))
+            trace_report = (f"\n### Separate utility-process allocator trace\n\n"
+                            f"{len(events)} MemoryReclaimer::Reclaim events; intervals in seconds: "
+                            f"{', '.join(f'{gap:.6f}' for gap in evidence['intervals_seconds']) or 'none'}.\n")
+            with (out / 'summary.md').open('a') as handle:
+                handle.write(trace_report)
+            if os.environ.get('GITHUB_STEP_SUMMARY'):
+                with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as handle:
+                    handle.write(trace_report)
+            print(trace_report, flush=True)
         # Separate phase: ptrace must not contaminate the primary CPU comparison.
         if not DARWIN and args.trace_seconds and shutil.which('strace'):
             traces = []

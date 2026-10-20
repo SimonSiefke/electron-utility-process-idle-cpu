@@ -33,7 +33,13 @@ Node's actual CPU time is reported, including occasional runtime work; it is not
 
 The source-level mechanism investigated is Chromium PartitionAlloc's memory reclaimer, whose recommended default interval is [four seconds](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/base/allocator/partition_allocator/src/partition_alloc/memory_reclaimer.cc). This is allocator housekeeping, not necessarily cleanup of JavaScript `Buffer` objects. Runtime versions and feature settings can change that behavior; the benchmark does not enable a four-second timer or force the result.
 
-## Run locally (Linux)
+## Verified local example (Linux x86_64)
+
+The [saved local evidence](evidence/linux-x64/summary.md) uses Electron 44.9.1 (embedded Node 24.22.0) and standalone Node 24.15.0. After 70s warmup, a 32s measurement recorded **1.939537ms Electron CPU versus 0ms Node CPU**. The separate utility-PID Chromium trace recorded four `MemoryReclaimer::Reclaim` events with gaps of **4.000287s, 4.000309s and 4.000375s**. This is local x86_64 evidence, not an ARM64 CI result; CI matches Node versions exactly.
+
+![Local x86_64 CPU timeline](evidence/linux-x64/cpu.svg)
+
+## Run locally
 
 On macOS, run `npm ci` then `python3 measure.py --require-reproduction --require-instructions`; Xvfb and Linux kernel settings do not apply.
 
