@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""External Linux sampler. No periodic callbacks are added to either workload."""
+"""External Linux/macOS sampler. No periodic callbacks are added to either workload."""
 import argparse
 import csv
 import json
@@ -14,6 +14,9 @@ import subprocess
 import time
 
 ROOT = Path(__file__).resolve().parent
+DARWIN = platform.system() == 'Darwin'
+if DARWIN:
+    from macos_counters import snapshot
 
 
 def thread_times(pid):
@@ -154,7 +157,7 @@ def main():
         print(f'Warming up for {args.warmup}s; PIDs {pids}', flush=True)
         time.sleep(args.warmup)
         perf_processes = {}
-        if shutil.which('perf'):
+        if not DARWIN and shutil.which('perf'):
             # Check that this VM exposes working PMU counters, not just event names.
             probe = subprocess.run(['perf', 'stat', '-x,', '-e', 'instructions:u', '--',
                                     'python3', '-c', 'sum(range(3000000))'],
@@ -174,8 +177,9 @@ def main():
                         'perf', 'stat', '-I', '100', '-x,', '-e', 'instructions:u',
                         '-p', str(pid), '-o', str(out / f'{name}-instructions.csv'),
                         '--', 'sleep', str(args.duration + 0.5)], f'{name}-perf.log')
-        previous = {name: thread_times(pid) for name, pid in pids.items()}
-        if any(sum(times.values()) == 0 for times in previous.values()):
+        previous = {name: (snapshot(pid) if DARWIN else thread_times(pid)) for name, pid in pids.items()}
+        initial = {name: dict(values) for name, values in previous.items()}
+        if not DARWIN and any(sum(times.values()) == 0 for times in previous.values()):
             raise RuntimeError('Scheduler accounting is disabled; enable kernel.sched_schedstats=1')
         rows = []
         start = time.monotonic()
@@ -186,9 +190,15 @@ def main():
             for name, pid in pids.items():
                 if node.poll() is not None or electron.poll() is not None:
                     raise RuntimeError('Workload exited during measurement')
-                current = thread_times(pid)
-                row[f'{name}_cpu_ms'] = sum(max(0, runtime - previous[name].get(tid, runtime))
-                                             for tid, runtime in current.items()) / 1e6
+                if DARWIN:
+                    current = snapshot(pid)
+                    row[f'{name}_cpu_ms'] = (current['cpu_ns'] - previous[name]['cpu_ns']) / 1e6
+                    for counter in ('instructions', 'cycles', 'idle_wakeups'):
+                        row[f'{name}_{counter}'] = current[counter] - previous[name][counter]
+                else:
+                    current = thread_times(pid)
+                    row[f'{name}_cpu_ms'] = sum(max(0, runtime - previous[name].get(tid, runtime))
+                                                 for tid, runtime in current.items()) / 1e6
                 previous[name] = current
             rows.append(row)
             deadline += args.interval
@@ -202,6 +212,10 @@ def main():
         instructions = {name: instruction_count(out / f'{name}-instructions.csv')
                         if name in perf_processes and perf_processes[name].returncode == 0 else None
                         for name in pids}
+        if DARWIN:
+            # Startup must have retired instructions: zero lifetime counts mean no PMU access.
+            instructions = {name: sum(row[f'{name}_instructions'] for row in rows)
+                            if initial[name]['instructions'] > 0 else None for name in pids}
         metrics['instructions'] = instructions
         metrics['instruction_counters_available'] = all(value is not None for value in instructions.values())
         (out / 'summary.json').write_text(json.dumps(metrics, indent=2))
@@ -210,7 +224,7 @@ def main():
                    f'Electron {metadata["versions"]["electron"]} (embedded Node {metadata["versions"]["node"]}); '
                    f'standalone Node {environment["node"]}.', '',
                    f'{args.warmup:g}s warmup, {args.duration:g}s measurement, {args.interval:g}s sampling.', '',
-                   '| Process | CPU time (ms) | ~4s intervals | Retired user instructions |',
+                   '| Process | CPU time (ms) | ~4s intervals | Retired instructions |',
                    '| --- | ---: | ---: | ---: |']
         for name in pids:
             summary.append(f'| {name} | {metrics[name]["cpu_ms"]:.6f} | '
@@ -219,8 +233,10 @@ def main():
         summary += ['', f'**Four-second idle CPU reproduction: {"OBSERVED" if metrics["reproduced"] else "NOT OBSERVED"}.**', '',
                     'Burst threshold: 0.02ms per sample; adjacent activity within 0.3s is merged. '
                     'Intervals in [3.5s, 4.5s] count toward the four-second cadence.', '',
-                    'Instruction totals use a separate perf clock/window (approximately measurement + 0.5s); '
-                    'see raw interval files. Missing/unsupported counters are not zero instructions.', '',
+                    ('macOS instructions/cycles use proc_pid_rusage V4 across all process threads, in the same sampling window. '
+                     'No user/kernel privilege filter is applied.' if DARWIN else
+                     'Linux user instruction totals use a separate perf clock/window (approximately measurement + 0.5s); '
+                     'see raw interval files. Missing/unsupported counters are not zero instructions.'), '',
                     'Scheduler CPU samples establish activity and timing, not its native call stack. '
                     'The separate syscall traces can show madvise calls; allocator attribution remains a hypothesis unless profiled.']
         report = '\n'.join(summary) + '\n'
@@ -230,7 +246,7 @@ def main():
             with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as handle:
                 handle.write(report)
         # Separate phase: ptrace must not contaminate the primary CPU comparison.
-        if args.trace_seconds and shutil.which('strace'):
+        if not DARWIN and args.trace_seconds and shutil.which('strace'):
             traces = []
             for name, pid in pids.items():
                 traces.append(launch(['timeout', '--signal=INT', str(args.trace_seconds),
@@ -240,6 +256,13 @@ def main():
                                     f'{name}-strace.log'))
             for proc in traces:
                 proc.wait(timeout=args.trace_seconds + 10)
+        if DARWIN:
+            # Native stacks are a separate diagnostic phase, after primary sampling.
+            for name, pid in pids.items():
+                if args.trace_seconds:
+                    subprocess.run(['sample', str(pid), str(int(args.trace_seconds)), '1',
+                                    '-file', str(out / f'{name}-stacks.txt')],
+                                   capture_output=True, text=True, timeout=args.trace_seconds + 20)
         if args.require_instructions and not metrics['instruction_counters_available']:
             raise SystemExit('Hardware instruction counters unavailable; see perf-probe.txt')
         if args.require_reproduction and not metrics['reproduced']:
